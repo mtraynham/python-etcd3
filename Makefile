@@ -1,9 +1,41 @@
 include MakefileHelp.mk
 
+ETCD_VERSION?=v3.5.6
 ETCD_DOWNLOAD_URL?=https://github.com/etcd-io/etcd/releases/download
 ETCD_PROTO_SOURCE_URL?=https://raw.githubusercontent.com/etcd-io/jetcd/main/jetcd-grpc/src/main/proto/
-TEST_ETCD_VERSION?=v3.3.10
-TEST_ETCD_DOCKER_HOST?=host.docker.internal
+
+.etcd:  ## installs etcd locally for running
+	@mkdir -p .etcd
+ifeq ($(shell uname -s),Linux)
+	@curl -L -s \
+		$(ETCD_DOWNLOAD_URL)/$(ETCD_VERSION)/etcd-$(ETCD_VERSION)-linux-amd64.tar.gz \
+		| tar xz -C .etcd
+	@mv .etcd/etcd-$(ETCD_VERSION)-linux-amd64/* .etcd/
+	@rm -r .etcd/etcd-$(ETCD_VERSION)-linux-amd64
+else ifeq ($(shell uname -s),Darwin)
+	@curl -L -s \
+		$(ETCD_DOWNLOAD_URL)/$(ETCD_VERSION)/etcd-$(ETCD_VERSION)-darwin-amd64.zip \
+		-o .etcd/etcd-$(ETCD_VERSION)-darwin-amd64.zip
+	@unzip -q -d .etcd .etcd/etcd-$(ETCD_VERSION)-darwin-amd64.zip
+	@mv .etcd/etcd-$(ETCD_VERSION)-darwin-amd64/* .etcd/
+	@rm -r .etcd/etcd-$(ETCD_VERSION)-darwin-amd64
+	@rm .etcd/etcd-$(ETCD_VERSION)-darwin-amd64.zip
+endif
+
+start:  ## starts etcd
+	@ETCD_VERSION=$(ETCD_VERSION) \
+		docker stack deploy \
+			--compose-file docker-compose.yml \
+			etcd
+	@docker run --rm \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+	    sudobmitch/docker-stack-wait:latest \
+	    etcd
+.PHONY: start
+
+stop:  ## stops etcd
+	@docker stack rm etcd
+.PHONY: stop
 
 install: ## install local development dependencies
 	@poetry install
@@ -27,32 +59,15 @@ lint:  ## lints all code
 	@poetry run flake8
 .PHONY: lint
 
-test: .etcd ## runs the tests
+test: .etcd  ## runs the tests
 	@PATH="$(PWD)/.etcd:$(PATH)"; \
-		TEST_ETCD_VERSION="$(TEST_ETCD_VERSION)"; \
-		poetry run pifpaf run etcd --cluster -- pytest -- --cov -v
+		PYTHON_ETCD_HTTP_URL="http://localhost:2379" \
+		poetry run pytest --cov -v
 .PHONY: test
 
 build:  ## builds the project to tar & wheel formats
 	@poetry build
-
-.etcd:  ## installs etcd locally for running
-	@mkdir -p .etcd
-ifeq ($(shell uname -s),Linux)
-	@curl -L -s \
-		$(ETCD_DOWNLOAD_URL)/$(TEST_ETCD_VERSION)/etcd-$(TEST_ETCD_VERSION)-linux-amd64.tar.gz \
-		| tar xz -C .etcd
-	@mv .etcd/etcd-$(TEST_ETCD_VERSION)-linux-amd64/* .etcd/
-	@rm -r .etcd/etcd-$(TEST_ETCD_VERSION)-linux-amd64
-else ifeq ($(shell uname -s),Darwin)
-	@curl -L -s \
-		$(ETCD_DOWNLOAD_URL)/$(TEST_ETCD_VERSION)/etcd-$(TEST_ETCD_VERSION)-darwin-amd64.zip \
-		-o .etcd/etcd-$(TEST_ETCD_VERSION)-darwin-amd64.zip
-	@unzip -q -d .etcd .etcd/etcd-$(TEST_ETCD_VERSION)-darwin-amd64.zip
-	@mv .etcd/etcd-$(TEST_ETCD_VERSION)-darwin-amd64/* .etcd/
-	@rm -r .etcd/etcd-$(TEST_ETCD_VERSION)-darwin-amd64
-	@rm .etcd/etcd-$(TEST_ETCD_VERSION)-darwin-amd64.zip
-endif
+.PHONY: build
 
 etcd3/proto:  ## clones the protobuf definitions
 	@mkdir -p etcd3/proto
@@ -77,24 +92,3 @@ etcd3/etcdrpc: etcd3/proto  ## generates etcd protobuf definitions
 	@rm etcd3/etcdrpc/auth_pb2_grpc.py
 	@rm etcd3/etcdrpc/kv_pb2_grpc.py
 .PHONY: etcd3/etcdrpc
-
-etcd-up: ## starts etcd
-	@docker run -d --rm \
-		--name etcd \
-		-p 2379:2379 \
-		-p 2380:2380 \
-		-e ETCD_NAME="s1" \
-		-e ETCD_DATA_DIR="/etc-data" \
-		-e ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:2379" \
-		-e ETCD_ADVERTISE_CLIENT_URLS="http://0.0.0.0:2379" \
-		-e ETCD_LISTEN_PEER_URLS="http://0.0.0.0:2380" \
-		-e ETCD_INITIAL_ADVERTISE_PEER_URLS="http://0.0.0.0:2380" \
-		-e ETCD_INITIAL_CLUSTER="s1=http://0.0.0.0:2380" \
-		-e ETCD_INITIAL_CLUSTER_TOKEN="tkn" \
-		-e ETCD_INITIAL_CLUSTER_STATE="new" \
-		gcr.io/etcd-development/etcd:$(TEST_ETCD_VERSION)
-.PHONY: etcd-up
-
-etcd-down: ## stops etcd
-	@docker stop etcd
-.PHONY: etcd-down
