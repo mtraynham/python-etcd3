@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from urllib.parse import urlparse
 
 import grpc
 
@@ -23,9 +24,6 @@ from hypothesis.strategies import characters
 import mock
 
 import pytest
-
-import six
-from six.moves.urllib.parse import urlparse
 
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -39,10 +37,7 @@ etcd_version = os.environ.get('TEST_ETCD_VERSION', 'v3.2.8')
 
 os.environ['ETCDCTL_API'] = '3'
 
-if six.PY2:
-    int_types = (int, long)
-else:
-    int_types = (int,)
+int_types = (int,)
 
 
 # Don't set any deadline in Hypothesis

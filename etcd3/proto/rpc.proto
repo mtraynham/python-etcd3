@@ -350,8 +350,7 @@ message Compare {
     VERSION = 0;
     CREATE = 1;
     MOD = 2;
-    VALUE = 3;
-    LEASE = 4;
+    VALUE= 3;
   }
   // result is logical comparison operation for this comparison.
   CompareResult result = 1;
@@ -368,11 +367,7 @@ message Compare {
     int64 mod_revision = 6;
     // value is the value of the given key, in bytes.
     bytes value = 7;
-    // lease is the lease id of the given key.
-    int64 lease = 8;
-    // leave room for more target_union field tags, jump to 64
   }
-
   // range_end compares the given target to all keys in the range [key, range_end).
   // See RangeRequest for more details on key ranges.
   bytes range_end = 64;
@@ -612,11 +607,15 @@ message Member {
   repeated string peerURLs = 3;
   // clientURLs is the list of URLs the member exposes to clients for communication. If the member is not started, clientURLs will be empty.
   repeated string clientURLs = 4;
+  // isLearner indicates if the member is raft learner.
+  bool isLearner = 5;
 }
 
 message MemberAddRequest {
   // peerURLs is the list of URLs the added member will use to communicate with the cluster.
   repeated string peerURLs = 1;
+  // isLearner indicates if the added member is raft learner.
+  bool isLearner = 2;
 }
 
 message MemberAddResponse {
@@ -800,8 +799,8 @@ message AuthRoleGrantPermissionRequest {
 
 message AuthRoleRevokePermissionRequest {
   string role = 1;
-  string key = 2;
-  string range_end = 3;
+  bytes key = 2;
+  bytes range_end = 3;
 }
 
 message AuthEnableResponse {
