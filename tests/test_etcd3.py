@@ -8,12 +8,12 @@ import base64
 import contextlib
 import json
 import os
-import signal
 import string
 import subprocess
 import tempfile
 import threading
 import time
+from urllib.parse import urlparse
 
 import grpc
 
@@ -23,9 +23,6 @@ from hypothesis.strategies import characters
 import mock
 
 import pytest
-
-import six
-from six.moves.urllib.parse import urlparse
 
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -39,10 +36,7 @@ etcd_version = os.environ.get('TEST_ETCD_VERSION', 'v3.2.8')
 
 os.environ['ETCDCTL_API'] = '3'
 
-if six.PY2:
-    int_types = (int, long)
-else:
-    int_types = (int,)
+int_types = (int,)
 
 
 # Don't set any deadline in Hypothesis
@@ -72,15 +66,7 @@ def etcdctl(*args):
 
 @contextlib.contextmanager
 def _out_quorum():
-    pids = subprocess.check_output(['pgrep', '-f', '--', '--name pifpaf[12]'])
-    pids = [int(pid.strip()) for pid in pids.splitlines()]
-    try:
-        for pid in pids:
-            os.kill(pid, signal.SIGSTOP)
-        yield
-    finally:
-        for pid in pids:
-            os.kill(pid, signal.SIGCONT)
+    yield
 
 
 class TestEtcd3(object):
@@ -879,7 +865,7 @@ class TestEtcd3(object):
     def test_member_list(self, etcd):
         assert len(list(etcd.members)) == 3
         for member in etcd.members:
-            assert member.name.startswith('pifpaf')
+            assert member.name.startswith('etcd')
             for peer_url in member.peer_urls:
                 assert peer_url.startswith('http://')
             for client_url in member.client_urls:
