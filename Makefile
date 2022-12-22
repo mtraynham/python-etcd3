@@ -47,6 +47,7 @@ uninstall: ## uninstalls local development dependencies
 
 clean: ## removes intermediate files and build artifacts
 	@if [ -d .etcd ]; then rm -rf .etcd; fi
+	@if [ -d .mypy_cache ]; then rm -rf .mypy_cache; fi
 	@if [ -d .pytest_cache ]; then rm -rf .pytest_cache; fi
 	@if [ -d .hypothesis ]; then rm -rf .hypothesis; fi
 	@if [ -f .coverage ]; then rm .coverage; fi
@@ -57,6 +58,7 @@ clean: ## removes intermediate files and build artifacts
 
 lint:  ## lints all code
 	@poetry run flake8
+	@poetry run mypy etcd3 tests
 .PHONY: lint
 
 test: .etcd  ## runs the tests
@@ -81,5 +83,7 @@ etcd3/etcdrpc:  ## generates etcd protobuf definitions
 		-I . \
 		--python_out=. \
 		--grpc_python_out=. \
+		--mypy_out=quiet:. \
+		--mypy_grpc_out=quiet:. \
 		$(shell find ./etcd3 -type f -name '*.proto')
 .PHONY: etcd3/etcdrpc
