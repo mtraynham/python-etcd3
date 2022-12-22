@@ -8,11 +8,12 @@ import base64
 import contextlib
 import json
 import os
-import string
+import string as strings
 import subprocess
 import tempfile
 import threading
 import time
+import typing
 from urllib.parse import urlparse
 
 import grpc
@@ -30,6 +31,7 @@ import etcd3
 import etcd3.etcdrpc as etcdrpc
 import etcd3.exceptions
 import etcd3.utils as utils
+import etcd3.watch as watch
 from etcd3.client import EtcdTokenCallCredentials
 
 etcd_version = os.environ.get('TEST_ETCD_VERSION', 'v3.2.8')
@@ -44,46 +46,37 @@ settings.register_profile("default", deadline=None)
 settings.load_profile("default")
 
 
-def etcdctl(*args):
+def etcdctl(*args: str) -> typing.Any:
     endpoint = os.environ.get('PYTHON_ETCD_HTTP_URL')
     if endpoint:
-        args = ['--endpoints', endpoint] + list(args)
-    args = ['etcdctl', '-w', 'json'] + list(args)
-    print(" ".join(args))
-    output = subprocess.check_output(args)
+        endpoint_args = ['--endpoints', endpoint]
+    else:
+        endpoint_args = []
+    cli_args = ['etcdctl', '-w', 'json'] + endpoint_args + list(args)
+    print(" ".join(cli_args))
+    output = subprocess.check_output(cli_args)
     return json.loads(output.decode('utf-8'))
 
 
-# def etcdctl2(*args):
-#     # endpoint = os.environ.get('PYTHON_ETCD_HTTP_URL')
-#     # if endpoint:
-#     #     args = ['--endpoints', endpoint] + list(args)
-#     # args = ['echo', 'pwd', '|', 'etcdctl', '-w', 'json'] + list(args)
-#     # print(" ".join(args))
-#     output = subprocess.check_output("echo pwd | ./etcdctl user add root")
-#     return json.loads(output.decode('utf-8'))
+class TestEtcd3:
 
-
-@contextlib.contextmanager
-def _out_quorum():
-    yield
-
-
-class TestEtcd3(object):
-
-    class MockedException(grpc.RpcError):
-        def __init__(self, code):
+    class MockedException(grpc.RpcError, grpc.Call):  # type: ignore
+        def __init__(self, code: grpc.StatusCode):
             self._code = code
 
-        def code(self):
+        def code(self) -> grpc.StatusCode:
             return self._code
 
     @contextlib.contextmanager
-    def get_clean_etcd(self):
+    def get_clean_etcd(
+        self
+    ) -> typing.Generator[etcd3.MultiEndpointEtcd3Client, None, None]:
         endpoint = os.environ.get('PYTHON_ETCD_HTTP_URL')
         timeout = 5
         if endpoint:
             url = urlparse(endpoint)
+            assert url.hostname is not None
+            assert url.port is not None
             with etcd3.client(host=url.hostname,
                               port=url.port,
                               timeout=timeout) as client:
@@ -93,7 +86,7 @@ class TestEtcd3(object):
                 yield client
 
         @retry(wait=wait_fixed(2), stop=stop_after_attempt(3))
-        def delete_keys_definitely():
+        def delete_keys_definitely() -> None:
             # clean up after fixture goes out of scope
             etcdctl('del', '--prefix', '/')
             out = etcdctl('get', '--prefix', '/')
@@ -102,24 +95,26 @@ class TestEtcd3(object):
         delete_keys_definitely()
 
     @pytest.fixture
-    def etcd(self):
+    def etcd(
+        self
+    ) -> typing.Generator[etcd3.MultiEndpointEtcd3Client, None, None]:
         with self.get_clean_etcd() as etcd:
             yield etcd
 
-    def test_get_unknown_key(self, etcd):
+    def test_get_unknown_key(self, etcd: etcd3.Etcd3Client) -> None:
         value, meta = etcd.get('probably-invalid-key')
         assert value is None
         assert meta is None
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_get_key(self, string):
+    def test_get_key(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             etcdctl('put', '/doot/a_key', string)
             returned, _ = etcd.get('/doot/a_key')
             assert returned == string.encode('utf-8')
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_get_random_key(self, string):
+    def test_get_random_key(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             etcdctl('put', '/doot/' + string, 'dootdoot')
             returned, _ = etcd.get('/doot/' + string)
@@ -129,22 +124,22 @@ class TestEtcd3(object):
         characters(blacklist_categories=['Cs', 'Cc']),
         characters(blacklist_categories=['Cs', 'Cc']),
     )
-    def test_get_key_serializable(self, key, string):
+    def test_get_key_serializable(self, key: str, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             etcdctl('put', '/doot/' + key, string)
-            with _out_quorum():
-                returned, _ = etcd.get('/doot/' + key, serializable=True)
+            returned, _ = etcd.get('/doot/' + key, serializable=True)
             assert returned == string.encode('utf-8')
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_get_have_cluster_revision(self, string):
+    def test_get_have_cluster_revision(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             etcdctl('put', '/doot/' + string, 'dootdoot')
             _, md = etcd.get('/doot/' + string)
-            assert md.response_header.revision > 0
+            if md:
+                assert md.response_header.revision > 0
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_put_key(self, string):
+    def test_put_key(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             etcd.put('/doot/put_1', string)
             out = etcdctl('get', '/doot/put_1')
@@ -152,20 +147,20 @@ class TestEtcd3(object):
                 string.encode('utf-8')
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_put_has_cluster_revision(self, string):
+    def test_put_has_cluster_revision(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             response = etcd.put('/doot/put_1', string)
             assert response.header.revision > 0
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_put_has_prev_kv(self, string):
+    def test_put_has_prev_kv(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             etcdctl('put', '/doot/put_1', 'old_value')
             response = etcd.put('/doot/put_1', string, prev_kv=True)
             assert response.prev_kv.value == b'old_value'
 
     @given(characters(blacklist_categories=['Cs', 'Cc']))
-    def test_put_if_not_exists(self, string):
+    def test_put_if_not_exists(self, string: str) -> None:
         with self.get_clean_etcd() as etcd:
             txn_status = etcd.put_if_not_exists('/doot/put_1', string)
             assert txn_status is True
@@ -175,7 +170,7 @@ class TestEtcd3(object):
 
             etcdctl('del', '/doot/put_1')
 
-    def test_delete_key(self, etcd):
+    def test_delete_key(self, etcd: etcd3.Etcd3Client) -> None:
         etcdctl('put', '/doot/delete_this', 'delete pls')
 
         v, _ = etcd.get('/doot/delete_this')
@@ -193,17 +188,22 @@ class TestEtcd3(object):
         v, _ = etcd.get('/doot/delete_this')
         assert v is None
 
-    def test_delete_has_cluster_revision(self, etcd):
+    def test_delete_has_cluster_revision(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         response = etcd.delete('/doot/delete_this', return_response=True)
+        assert isinstance(response, etcd3.etcdrpc.DeleteRangeResponse)
         assert response.header.revision > 0
 
-    def test_delete_has_prev_kv(self, etcd):
+    def test_delete_has_prev_kv(self, etcd: etcd3.Etcd3Client) -> None:
         etcdctl('put', '/doot/delete_this', 'old_value')
         response = etcd.delete('/doot/delete_this', prev_kv=True,
                                return_response=True)
+        assert isinstance(response, etcd3.etcdrpc.DeleteRangeResponse)
         assert response.prev_kvs[0].value == b'old_value'
 
-    def test_delete_keys_with_prefix(self, etcd):
+    def test_delete_keys_with_prefix(self, etcd: etcd3.Etcd3Client) -> None:
         etcdctl('put', '/foo/1', 'bar')
         etcdctl('put', '/foo/2', 'baz')
 
@@ -222,7 +222,7 @@ class TestEtcd3(object):
         v, _ = etcd.get('/foo/2')
         assert v is None
 
-    def test_new_watch_error(self, etcd):
+    def test_new_watch_error(self, etcd: etcd3.Etcd3Client) -> None:
         # Trigger a failure while waiting on the new watch condition
         with mock.patch.object(etcd.watcher._new_watch_cond, 'wait',
                                side_effect=ValueError):
@@ -235,14 +235,14 @@ class TestEtcd3(object):
         next(events)
         cancel()
 
-    def test_watch_key(self, etcd):
-        def update_etcd(v):
+    def test_watch_key(self, etcd: etcd3.Etcd3Client) -> None:
+        def update_etcd(v: str) -> None:
             etcdctl('put', '/doot/watch', v)
             out = etcdctl('get', '/doot/watch')
             assert base64.b64decode(out['kvs'][0]['value']) == \
                 utils.to_bytes(v)
 
-        def update_key():
+        def update_key() -> None:
             # sleep to make watch can get the event
             time.sleep(3)
             update_etcd('0')
@@ -274,16 +274,19 @@ class TestEtcd3(object):
 
         t.join()
 
-    def test_watch_key_with_revision_compacted(self, etcd):
+    def test_watch_key_with_revision_compacted(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         etcdctl('put', '/random', '1')  # Some data to compact
 
-        def update_etcd(v):
+        def update_etcd(v: str) -> None:
             etcdctl('put', '/watchcompation', v)
             out = etcdctl('get', '/watchcompation')
             assert base64.b64decode(out['kvs'][0]['value']) == \
                 utils.to_bytes(v)
 
-        def update_key():
+        def update_key() -> None:
             # sleep to make watch can get the event
             time.sleep(3)
             update_etcd('0')
@@ -298,7 +301,7 @@ class TestEtcd3(object):
         t = threading.Thread(name="update_key", target=update_key)
         t.start()
 
-        def watch_compacted_revision_test():
+        def watch_compacted_revision_test() -> None:
             events_iterator, cancel = etcd.watch(
                 b'/watchcompation', start_revision=1)
 
@@ -336,12 +339,20 @@ class TestEtcd3(object):
 
         t.join()
 
-    def test_watch_exception_during_watch(self, etcd):
-        def pass_exception_to_callback(callback):
+    def test_watch_exception_during_watch(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
+        def pass_exception_to_callback(
+            callback: typing.Callable[[grpc.RpcError], None]
+        ) -> None:
             time.sleep(1)
             callback(self.MockedException(grpc.StatusCode.UNAVAILABLE))
 
-        def add_callback_mock(*args, **kwargs):
+        def add_callback_mock(
+            *args: typing.Any,
+            **kwargs: typing.Any
+        ) -> int:
             callback = args[1]
             t = threading.Thread(name="pass_exception_to_callback",
                                  target=pass_exception_to_callback,
@@ -359,26 +370,32 @@ class TestEtcd3(object):
             for _ in events_iterator:
                 pass
 
-    def test_watch_timeout_on_establishment(self, etcd):
+    def test_watch_timeout_on_establishment(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         foo_etcd = etcd3.client(timeout=3)
 
-        def slow_watch_mock(*args, **kwargs):
+        def slow_watch_mock(
+            *args: typing.Any,
+            **kwargs: typing.Any
+        ) -> typing.Any:
             time.sleep(4)
             return []
 
-        foo_etcd.watcher._watch_stub.Watch = slow_watch_mock  # noqa
+        foo_etcd.watcher._watch_stub.Watch = slow_watch_mock  # type: ignore
 
         with pytest.raises(etcd3.exceptions.WatchTimedOut):
             foo_etcd.watch('foo')
 
-    def test_watch_prefix(self, etcd):
-        def update_etcd(v):
+    def test_watch_prefix(self, etcd: etcd3.Etcd3Client) -> None:
+        def update_etcd(v: str) -> None:
             etcdctl('put', '/doot/watch/prefix/' + v, v)
             out = etcdctl('get', '/doot/watch/prefix/' + v)
             assert base64.b64decode(out['kvs'][0]['value']) == \
                 utils.to_bytes(v)
 
-        def update_key():
+        def update_key() -> None:
             # sleep to make watch can get the event
             time.sleep(3)
             update_etcd('0')
@@ -411,14 +428,14 @@ class TestEtcd3(object):
 
         t.join()
 
-    def test_watch_prefix_callback(self, etcd):
-        def update_etcd(v):
+    def test_watch_prefix_callback(self, etcd: etcd3.Etcd3Client) -> None:
+        def update_etcd(v: str) -> None:
             etcdctl('put', '/doot/watch/prefix/callback/' + v, v)
             out = etcdctl('get', '/doot/watch/prefix/callback/' + v)
             assert base64.b64decode(out['kvs'][0]['value']) == \
                 utils.to_bytes(v)
 
-        def update_key():
+        def update_key() -> None:
             # sleep to make watch can get the event
             time.sleep(3)
             update_etcd('0')
@@ -428,7 +445,7 @@ class TestEtcd3(object):
 
         events = []
 
-        def callback(event):
+        def callback(event: watch.WatchResponse) -> None:
             events.extend(event.events)
 
         t = threading.Thread(name="update_key_prefix", target=update_key)
@@ -448,17 +465,20 @@ class TestEtcd3(object):
 
     @pytest.mark.skipif(etcd_version.startswith('v3.0'),
                         reason="requires etcd v3.1 or higher")
-    def test_watch_prefix_callback_with_filter(self, etcd):
-        def update_etcd(v):
+    def test_watch_prefix_callback_with_filter(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
+        def update_etcd(v: str) -> None:
             etcdctl('put', '/doot/watch/prefix/callback/' + v, v)
             out = etcdctl('get', '/doot/watch/prefix/callback/' + v)
             assert base64.b64decode(out['kvs'][0]['value']) == \
                 utils.to_bytes(v)
 
-        def delete_etcd(v):
+        def delete_etcd(v: str) -> None:
             etcdctl('del', '/doot/watch/prefix/callback/' + v)
 
-        def update_key():
+        def update_key() -> None:
             time.sleep(3)
             update_etcd('0')
             time.sleep(1)
@@ -469,7 +489,7 @@ class TestEtcd3(object):
 
         events = []
 
-        def callback(event):
+        def callback(event: watch.WatchResponse) -> None:
             events.extend(event.events)
 
         t = threading.Thread(name="update_key_prefix", target=update_key)
@@ -490,7 +510,10 @@ class TestEtcd3(object):
         assert events[1].key.decode() == '/doot/watch/prefix/callback/1'
         assert events[1].value.decode() == '1'
 
-    def test_sequential_watch_prefix_once(self, etcd):
+    def test_sequential_watch_prefix_once(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         try:
             etcd.watch_prefix_once('/doot/', 1)
         except etcd3.exceptions.WatchTimedOut:
@@ -504,7 +527,7 @@ class TestEtcd3(object):
         except etcd3.exceptions.WatchTimedOut:
             pass
 
-    def test_watch_responses(self, etcd):
+    def test_watch_responses(self, etcd: etcd3.Etcd3Client) -> None:
         # Test watch_response & watch_once_response
         revision = etcd.put('/doot/watch', '0').header.revision
         etcd.put('/doot/watch', '1')
@@ -529,8 +552,10 @@ class TestEtcd3(object):
         # Test watch_prefix_response & watch_prefix_once_response
         success_ops = [etcd.transactions.put('/doot/watch/prefix/0', '0'),
                        etcd.transactions.put('/doot/watch/prefix/1', '1')]
-        revision = etcd.transaction([], success_ops,
-                                    [])[1][0].response_put.header.revision
+        revision = typing.cast(
+            typing.List[etcd3.etcdrpc.ResponseOp],
+            etcd.transaction([], success_ops, [])[1]
+        )[0].response_put.header.revision
 
         responses_iterator, cancel = \
             etcd.watch_prefix_response('/doot/watch/prefix/',
@@ -551,7 +576,7 @@ class TestEtcd3(object):
                 assert event.value == utils.to_bytes(str(count))
                 count += 1
 
-    def test_transaction_success(self, etcd):
+    def test_transaction_success(self, etcd: etcd3.Etcd3Client) -> None:
         etcdctl('put', '/doot/txn', 'dootdoot')
         etcd.transaction(
             compare=[etcd.transactions.value('/doot/txn') == 'dootdoot'],
@@ -561,7 +586,7 @@ class TestEtcd3(object):
         out = etcdctl('get', '/doot/txn')
         assert base64.b64decode(out['kvs'][0]['value']) == b'success'
 
-    def test_transaction_failure(self, etcd):
+    def test_transaction_failure(self, etcd: etcd3.Etcd3Client) -> None:
         etcdctl('put', '/doot/txn', 'notdootdoot')
         etcd.transaction(
             compare=[etcd.transactions.value('/doot/txn') == 'dootdoot'],
@@ -571,15 +596,15 @@ class TestEtcd3(object):
         out = etcdctl('get', '/doot/txn')
         assert base64.b64decode(out['kvs'][0]['value']) == b'failure'
 
-    def test_ops_to_requests(self, etcd):
+    def test_ops_to_requests(self, etcd: etcd3.Etcd3Client) -> None:
         with pytest.raises(Exception):
-            etcd._ops_to_requests(['not_transaction_type'])
+            etcd._ops_to_requests(['not_transaction_type'])  # type: ignore
         with pytest.raises(TypeError):
-            etcd._ops_to_requests(0)
+            etcd._ops_to_requests(0)  # type: ignore
 
     @pytest.mark.skipif(etcd_version < 'v3.3',
                         reason="requires etcd v3.3 or higher")
-    def test_nested_transactions(self, etcd):
+    def test_nested_transactions(self, etcd: etcd3.Etcd3Client) -> None:
         etcd.transaction(
             compare=[],
             success=[etcd.transactions.put('/doot/txn1', '1'),
@@ -596,7 +621,10 @@ class TestEtcd3(object):
 
     @pytest.mark.skipif(etcd_version < 'v3.3',
                         reason="requires etcd v3.3 or higher")
-    def test_transaction_range_conditions(self, etcd):
+    def test_transaction_range_conditions(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         etcdctl('put', '/doot/key1', 'dootdoot')
         etcdctl('put', '/doot/key2', 'notdootdoot')
         range_end = utils.prefix_range_end(utils.to_bytes('/doot/'))
@@ -607,21 +635,21 @@ class TestEtcd3(object):
         status, _ = etcd.transaction(compare=compare, success=[], failure=[])
         assert status
 
-    def test_replace_success(self, etcd):
+    def test_replace_success(self, etcd: etcd3.Etcd3Client) -> None:
         etcd.put('/doot/thing', 'toot')
         status = etcd.replace('/doot/thing', 'toot', 'doot')
         v, _ = etcd.get('/doot/thing')
         assert v == b'doot'
         assert status is True
 
-    def test_replace_fail(self, etcd):
+    def test_replace_fail(self, etcd: etcd3.Etcd3Client) -> None:
         etcd.put('/doot/thing', 'boot')
         status = etcd.replace('/doot/thing', 'toot', 'doot')
         v, _ = etcd.get('/doot/thing')
         assert v == b'boot'
         assert status is False
 
-    def test_get_prefix(self, etcd):
+    def test_get_prefix(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/range{}'.format(i), 'i am a range')
 
@@ -633,7 +661,7 @@ class TestEtcd3(object):
         for value, _ in values:
             assert value == b'i am a range'
 
-    def test_get_prefix_keys_only(self, etcd):
+    def test_get_prefix_keys_only(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/range{}'.format(i), 'i am a range')
 
@@ -646,22 +674,21 @@ class TestEtcd3(object):
             assert meta.key.startswith(b"/doot/range")
             assert not value
 
-    def test_get_prefix_serializable(self, etcd):
+    def test_get_prefix_serializable(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/range{}'.format(i), 'i am a range')
 
-        with _out_quorum():
-            values = list(etcd.get_prefix(
-                '/doot/range', keys_only=True, serializable=True))
+        values = list(etcd.get_prefix(
+            '/doot/range', keys_only=True, serializable=True))
 
         assert len(values) == 20
 
-    def test_get_prefix_error_handling(self, etcd):
+    def test_get_prefix_error_handling(self, etcd: etcd3.Etcd3Client) -> None:
         with pytest.raises(TypeError, match="Don't use "):
             etcd.get_prefix('a_prefix', range_end='end')
 
-    def test_get_range(self, etcd):
-        for char in string.ascii_lowercase:
+    def test_get_range(self, etcd: etcd3.Etcd3Client) -> None:
+        for char in strings.ascii_lowercase:
             if char < 'p':
                 etcdctl('put', '/doot/' + char, 'i am in range')
             else:
@@ -672,18 +699,18 @@ class TestEtcd3(object):
         for value, _ in values:
             assert value == b'i am in range'
 
-    def test_all_not_found_error(self, etcd):
+    def test_all_not_found_error(self, etcd: etcd3.Etcd3Client) -> None:
         result = list(etcd.get_all())
         assert not result
 
-    def test_range_not_found_error(self, etcd):
+    def test_range_not_found_error(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(5):
             etcdctl('put', '/doot/notrange{}'.format(i), 'i am a not range')
 
         result = list(etcd.get_prefix('/doot/range'))
         assert not result
 
-    def test_get_all(self, etcd):
+    def test_get_all(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/range{}'.format(i), 'i am in all')
 
@@ -694,7 +721,7 @@ class TestEtcd3(object):
         for value, _ in values:
             assert value == b'i am in all'
 
-    def test_get_all_keys_only(self, etcd):
+    def test_get_all_keys_only(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/range{}'.format(i), 'i am in all')
 
@@ -706,7 +733,7 @@ class TestEtcd3(object):
             assert meta.key.startswith(b"/doot/")
             assert not value
 
-    def test_get_count_only(self, etcd):
+    def test_get_count_only(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/count{}'.format(i), 'i am in all')
         resp = etcd.get_prefix_response(
@@ -716,7 +743,7 @@ class TestEtcd3(object):
         assert len(resp.kvs) == 0
         assert resp.count == 20
 
-    def test_get_limit(self, etcd):
+    def test_get_limit(self, etcd: etcd3.Etcd3Client) -> None:
         for i in range(20):
             etcdctl('put', '/doot/limit{}'.format(i), 'i am in all')
         for i in range(20):
@@ -729,7 +756,7 @@ class TestEtcd3(object):
                 assert len(resp.kvs) == i
                 assert resp.more is True
 
-    def test_get_revision(self, etcd):
+    def test_get_revision(self, etcd: etcd3.Etcd3Client) -> None:
         revisions = []
         for i in range(20):
             resp = etcdctl('put', '/doot/revision{}'.format(i), 'i am in all')
@@ -741,7 +768,7 @@ class TestEtcd3(object):
             )
             assert resp.count == min(len(revisions), i + 1)
 
-    def test_get_min_mod_revision(self, etcd):
+    def test_get_min_mod_revision(self, etcd: etcd3.Etcd3Client) -> None:
         revisions = []
         for i in range(5):
             resp = etcdctl('put', '/doot/revision', str(i))
@@ -755,7 +782,7 @@ class TestEtcd3(object):
 
     @pytest.mark.skipif(etcd_version.startswith('v3.0'),
                         reason="requires etcd v3.1 or higher")
-    def test_get_max_mod_revision(self, etcd):
+    def test_get_max_mod_revision(self, etcd: etcd3.Etcd3Client) -> None:
         revisions = []
         for i in range(5):
             resp = etcdctl('put', '/doot/revision', str(i))
@@ -770,8 +797,8 @@ class TestEtcd3(object):
             else:
                 assert len(resp.kvs) == 0
 
-    def test_sort_order(self, etcd):
-        def remove_prefix(string, prefix):
+    def test_sort_order(self, etcd: etcd3.Etcd3Client) -> None:
+        def remove_prefix(string: str, prefix: str) -> str:
             return string[len(prefix):]
 
         initial_keys = 'abcde'
@@ -792,7 +819,7 @@ class TestEtcd3(object):
 
         assert reverse_keys == ''.join(reversed(initial_keys))
 
-    def test_get_response(self, etcd):
+    def test_get_response(self, etcd: etcd3.Etcd3Client) -> None:
         etcdctl('put', '/foo/key1', 'value1')
         etcdctl('put', '/foo/key2', 'value2')
         response = etcd.get_response('/foo/key1')
@@ -823,32 +850,32 @@ class TestEtcd3(object):
         assert response.count == 0
         assert response.header.revision > 0
 
-    def test_lease_grant(self, etcd):
+    def test_lease_grant(self, etcd: etcd3.Etcd3Client) -> None:
         lease = etcd.lease(1)
 
         assert isinstance(lease.ttl, int_types)
         assert isinstance(lease.id, int_types)
 
-    def test_lease_revoke(self, etcd):
+    def test_lease_revoke(self, etcd: etcd3.Etcd3Client) -> None:
         lease = etcd.lease(1)
         lease.revoke()
 
     @pytest.mark.skipif(etcd_version.startswith('v3.0'),
                         reason="requires etcd v3.1 or higher")
-    def test_lease_keys_empty(self, etcd):
+    def test_lease_keys_empty(self, etcd: etcd3.Etcd3Client) -> None:
         lease = etcd.lease(1)
         assert lease.keys == []
 
     @pytest.mark.skipif(etcd_version.startswith('v3.0'),
                         reason="requires etcd v3.1 or higher")
-    def test_lease_single_key(self, etcd):
+    def test_lease_single_key(self, etcd: etcd3.Etcd3Client) -> None:
         lease = etcd.lease(1)
         etcd.put('/doot/lease_test', 'this is a lease', lease=lease)
         assert lease.keys == [b'/doot/lease_test']
 
     @pytest.mark.skipif(etcd_version.startswith('v3.0'),
                         reason="requires etcd v3.1 or higher")
-    def test_lease_expire(self, etcd):
+    def test_lease_expire(self, etcd: etcd3.Etcd3Client) -> None:
         key = '/doot/lease_test_expire'
         lease = etcd.lease(1)
         etcd.put(key, 'this is a lease', lease=lease)
@@ -862,7 +889,7 @@ class TestEtcd3(object):
         v, _ = etcd.get(key)
         assert v is None
 
-    def test_member_list(self, etcd):
+    def test_member_list(self, etcd: etcd3.Etcd3Client) -> None:
         assert len(list(etcd.members)) == 3
         for member in etcd.members:
             assert member.name.startswith('etcd')
@@ -872,14 +899,14 @@ class TestEtcd3(object):
                 assert client_url.startswith('http://')
             assert isinstance(member.id, int_types) is True
 
-    def test_lock_acquire(self, etcd):
+    def test_lock_acquire(self, etcd: etcd3.Etcd3Client) -> None:
         lock = etcd.lock('lock-1', ttl=10)
         assert lock.acquire() is True
         assert etcd.get(lock.key)[0] is not None
         assert lock.acquire(timeout=0) is False
         assert lock.acquire(timeout=1) is False
 
-    def test_lock_release(self, etcd):
+    def test_lock_release(self, etcd: etcd3.Etcd3Client) -> None:
         lock = etcd.lock('lock-2', ttl=10)
         assert lock.acquire() is True
         assert etcd.get(lock.key)[0] is not None
@@ -890,7 +917,7 @@ class TestEtcd3(object):
         assert lock.release() is True
         assert lock.acquire(timeout=None) is True
 
-    def test_lock_expire(self, etcd):
+    def test_lock_expire(self, etcd: etcd3.Etcd3Client) -> None:
         lock = etcd.lock('lock-3', ttl=3)
         assert lock.acquire() is True
         assert etcd.get(lock.key)[0] is not None
@@ -899,7 +926,7 @@ class TestEtcd3(object):
         v, _ = etcd.get(lock.key)
         assert v is None
 
-    def test_lock_refresh(self, etcd):
+    def test_lock_refresh(self, etcd: etcd3.Etcd3Client) -> None:
         lock = etcd.lock('lock-4', ttl=3)
         assert lock.acquire() is True
         assert etcd.get(lock.key)[0] is not None
@@ -911,7 +938,7 @@ class TestEtcd3(object):
 
         assert etcd.get(lock.key)[0] is not None
 
-    def test_lock_is_acquired(self, etcd):
+    def test_lock_is_acquired(self, etcd: etcd3.Etcd3Client) -> None:
         lock1 = etcd.lock('lock-5', ttl=2)
         assert lock1.is_acquired() is False
 
@@ -925,12 +952,12 @@ class TestEtcd3(object):
         assert lock3.is_acquired() is True
         assert lock2.is_acquired() is False
 
-    def test_lock_context_manager(self, etcd):
+    def test_lock_context_manager(self, etcd: etcd3.Etcd3Client) -> None:
         with etcd.lock('lock-6', ttl=2) as lock:
             assert lock.is_acquired() is True
         assert lock.is_acquired() is False
 
-    def test_lock_contended(self, etcd):
+    def test_lock_contended(self, etcd: etcd3.Etcd3Client) -> None:
         lock1 = etcd.lock('lock-7', ttl=2)
         lock1.acquire()
         lock2 = etcd.lock('lock-7', ttl=2)
@@ -938,27 +965,33 @@ class TestEtcd3(object):
         assert lock1.is_acquired() is False
         assert lock2.is_acquired() is True
 
-    def test_lock_double_acquire_release(self, etcd):
+    def test_lock_double_acquire_release(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         lock = etcd.lock('lock-8', ttl=10)
         assert lock.acquire(0) is True
         assert lock.acquire(0) is False
         assert lock.release() is True
 
-    def test_lock_acquire_none(self, etcd):
+    def test_lock_acquire_none(self, etcd: etcd3.Etcd3Client) -> None:
         lock = etcd.lock('lock-9', ttl=10)
         assert lock.acquire(None) is True
         # This will succeed after 10 seconds since the TTL will expire and the
         # lock is not refreshed
         assert lock.acquire(None) is True
 
-    def test_lock_acquire_with_timeout(self, etcd):
+    def test_lock_acquire_with_timeout(self, etcd: etcd3.Etcd3Client) -> None:
         lock1 = etcd.lock('lock-10', ttl=10)
         lock2 = etcd.lock('lock-10', ttl=10)
 
         original_watch = etcd.watch
         watch_called = [0]
 
-        def release_lock_before_watch(*args, **kwargs):
+        def release_lock_before_watch(
+            *args: typing.Any,
+            **kwargs: typing.Any
+        ) -> typing.Any:
             watch_called[0] += 1
             # Simulates the case where key is expired before watch is called.
             # See https://github.com/kragniz/python-etcd3/issues/1107
@@ -968,7 +1001,10 @@ class TestEtcd3(object):
         original_transaction = etcd.transaction
         transaction_called = [0]
 
-        def transaction_wrapper(*args, **kwargs):
+        def transaction_wrapper(
+            *args: typing.Any,
+            **kwargs: typing.Any
+        ) -> typing.Any:
             transaction_called[0] += 1
             return original_transaction(*args, **kwargs)
 
@@ -985,7 +1021,10 @@ class TestEtcd3(object):
         # transaction must be called once for lock1, twice for lock2
         assert transaction_called[0] == 3
 
-    def test_internal_exception_on_internal_error(self, etcd):
+    def test_internal_exception_on_internal_error(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         exception = self.MockedException(grpc.StatusCode.INTERNAL)
         kv_mock = mock.PropertyMock()
         kv_mock.Range.side_effect = exception
@@ -995,7 +1034,10 @@ class TestEtcd3(object):
             with pytest.raises(etcd3.exceptions.InternalServerError):
                 etcd.get("foo")
 
-    def test_connection_failure_exception_on_connection_failure(self, etcd):
+    def test_connection_failure_exception_on_connection_failure(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         exception = self.MockedException(grpc.StatusCode.UNAVAILABLE)
         kv_mock = mock.PropertyMock()
         kv_mock.Range.side_effect = exception
@@ -1006,7 +1048,10 @@ class TestEtcd3(object):
                 etcd.get("foo")
             assert etcd.endpoint_in_use.is_failed()
 
-    def test_connection_timeout_exception_on_connection_timeout(self, etcd):
+    def test_connection_timeout_exception_on_connection_timeout(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         exception = self.MockedException(grpc.StatusCode.DEADLINE_EXCEEDED)
         kv_mock = mock.PropertyMock()
         kv_mock.Range.side_effect = exception
@@ -1017,7 +1062,7 @@ class TestEtcd3(object):
                 etcd.get("foo")
             assert etcd.endpoint_in_use.is_failed()
 
-    def test_single_endpoint_failover(self, etcd):
+    def test_single_endpoint_failover(self, etcd: etcd3.Etcd3Client) -> None:
         etcd.failover = True
         exception = self.MockedException(grpc.StatusCode.UNAVAILABLE)
         kv_mock = mock.PropertyMock()
@@ -1030,7 +1075,10 @@ class TestEtcd3(object):
         with pytest.raises(etcd3.exceptions.NoServerAvailableError):
             etcd.get("foo")
 
-    def test_grpc_exception_on_unknown_code(self, etcd):
+    def test_grpc_exception_on_unknown_code(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         exception = self.MockedException(grpc.StatusCode.DATA_LOSS)
         kv_mock = mock.PropertyMock()
         kv_mock.Range.side_effect = exception
@@ -1041,16 +1089,17 @@ class TestEtcd3(object):
                 etcd.get("foo")
             assert not etcd.endpoint_in_use.is_failed()
 
-    def test_status_member(self, etcd):
+    def test_status_member(self, etcd: etcd3.Etcd3Client) -> None:
         status = etcd.status()
 
         assert isinstance(status.leader, etcd3.members.Member) is True
+        assert status.leader is not None
         assert status.leader.id in [m.id for m in etcd.members]
 
-    def test_hash(self, etcd):
+    def test_hash(self, etcd: etcd3.Etcd3Client) -> None:
         assert isinstance(etcd.hash(), int)
 
-    def test_snapshot(self, etcd):
+    def test_snapshot(self, etcd: etcd3.Etcd3Client) -> None:
         with tempfile.NamedTemporaryFile() as f:
             etcd.snapshot(f)
             f.flush()
@@ -1058,9 +1107,9 @@ class TestEtcd3(object):
             etcdctl('snapshot', 'status', f.name)
 
 
-class TestAlarms(object):
+class TestAlarms:
     @pytest.fixture
-    def etcd(self):
+    def etcd(self) -> typing.Generator[etcd3.Etcd3Client, None, None]:
         etcd = etcd3.client()
         yield etcd
         etcd.disarm_alarm()
@@ -1068,14 +1117,17 @@ class TestAlarms(object):
             if m.active_alarms:
                 etcd.disarm_alarm(m.id)
 
-    def test_create_alarm_all_members(self, etcd):
+    def test_create_alarm_all_members(self, etcd: etcd3.Etcd3Client) -> None:
         alarms = etcd.create_alarm()
 
         assert len(alarms) == 1
         assert alarms[0].member_id == 0
         assert alarms[0].alarm_type == etcdrpc.NOSPACE
 
-    def test_create_alarm_specific_member(self, etcd):
+    def test_create_alarm_specific_member(
+        self,
+        etcd: etcd3.Etcd3Client
+    ) -> None:
         a_member = next(etcd.members)
 
         alarms = etcd.create_alarm(member_id=a_member.id)
@@ -1084,7 +1136,7 @@ class TestAlarms(object):
         assert alarms[0].member_id == a_member.id
         assert alarms[0].alarm_type == etcdrpc.NOSPACE
 
-    def test_list_alarms(self, etcd):
+    def test_list_alarms(self, etcd: etcd3.Etcd3Client) -> None:
         a_member = next(etcd.members)
         etcd.create_alarm()
         etcd.create_alarm(member_id=a_member.id)
@@ -1099,7 +1151,7 @@ class TestAlarms(object):
 
         assert possible_member_ids == []
 
-    def test_disarm_alarm(self, etcd):
+    def test_disarm_alarm(self, etcd: etcd3.Etcd3Client) -> None:
         etcd.create_alarm()
         assert len(list(etcd.list_alarms())) == 1
 
@@ -1107,38 +1159,43 @@ class TestAlarms(object):
         assert len(list(etcd.list_alarms())) == 0
 
 
-class TestUtils(object):
-    def test_prefix_range_end(self):
+class TestUtils:
+    def test_prefix_range_end(self) -> None:
         assert etcd3.utils.prefix_range_end(b'foo') == b'fop'
         assert etcd3.utils.prefix_range_end(b'ab\xff') == b'ac\xff'
         assert (etcd3.utils.prefix_range_end(b'a\xff\xff\xff\xff\xff')
                 == b'b\xff\xff\xff\xff\xff')
 
-    def test_to_bytes(self):
+    def test_to_bytes(self) -> None:
         assert isinstance(etcd3.utils.to_bytes(b'doot'), bytes) is True
         assert isinstance(etcd3.utils.to_bytes('doot'), bytes) is True
         assert etcd3.utils.to_bytes(b'doot') == b'doot'
         assert etcd3.utils.to_bytes('doot') == b'doot'
 
 
-class TestEtcdTokenCallCredentials(object):
+class TestEtcdTokenCallCredentials:
 
-    def test_token_callback(self):
+    def test_token_callback(self) -> None:
         e = EtcdTokenCallCredentials('foo')
         callback = mock.MagicMock()
-        e(None, callback)
+        e(mock.MagicMock(), callback)
         metadata = (('token', 'foo'),)
         callback.assert_called_once_with(metadata, None)
 
 
-class TestClient(object):
+class TestClient:
     @pytest.fixture
-    def etcd(self):
+    def etcd(self) -> typing.Generator[etcd3.Etcd3Client, None, None]:
         yield etcd3.client()
 
-    def test_sort_target(self, etcd):
+    def test_sort_target(self, etcd: etcd3.Etcd3Client) -> None:
         key = 'key'.encode('utf-8')
-        sort_target = {
+        sort_target: typing.Dict[
+            typing.Optional[
+                typing.Literal['key', 'version', 'create', 'mod', 'value']
+            ],
+            etcd3.etcdrpc.RangeRequest.SortTarget.ValueType
+        ] = {
             None: etcdrpc.RangeRequest.KEY,
             'key': etcdrpc.RangeRequest.KEY,
             'version': etcdrpc.RangeRequest.VERSION,
@@ -1152,11 +1209,19 @@ class TestClient(object):
                                                           sort_target=input)
             assert range_request.sort_target == expected
         with pytest.raises(ValueError):
-            etcd._build_get_range_request(key, sort_target='feelsbadman')
+            etcd._build_get_range_request(
+                key,
+                sort_target='feelsbadman'  # type: ignore
+            )
 
-    def test_sort_order(self, etcd):
+    def test_sort_order(self, etcd: etcd3.Etcd3Client) -> None:
         key = 'key'.encode('utf-8')
-        sort_target = {
+        sort_target: typing.Dict[
+            typing.Optional[
+                typing.Literal['ascend', 'descend']
+            ],
+            etcdrpc.RangeRequest.SortOrder.ValueType
+        ] = {
             None: etcdrpc.RangeRequest.NONE,
             'ascend': etcdrpc.RangeRequest.ASCEND,
             'descend': etcdrpc.RangeRequest.DESCEND,
@@ -1167,9 +1232,12 @@ class TestClient(object):
                                                           sort_order=input)
             assert range_request.sort_order == expected
         with pytest.raises(ValueError):
-            etcd._build_get_range_request(key, sort_order='feelsbadman')
+            etcd._build_get_range_request(
+                key,
+                sort_order='feelsbadman'  # type: ignore
+            )
 
-    def test_secure_channel(self):
+    def test_secure_channel(self) -> None:
         client = etcd3.client(
             ca_cert="tests/ca.crt",
             cert_key="tests/client.key",
@@ -1177,7 +1245,7 @@ class TestClient(object):
         )
         assert client.uses_secure_channel is True
 
-    def test_secure_channel_ca_cert_only(self):
+    def test_secure_channel_ca_cert_only(self) -> None:
         client = etcd3.client(
             ca_cert="tests/ca.crt",
             cert_key=None,
@@ -1185,7 +1253,7 @@ class TestClient(object):
         )
         assert client.uses_secure_channel is True
 
-    def test_secure_channel_ca_cert_and_key_raise_exception(self):
+    def test_secure_channel_ca_cert_and_key_raise_exception(self) -> None:
         with pytest.raises(ValueError):
             etcd3.client(
                 ca_cert='tests/ca.crt',
@@ -1198,12 +1266,12 @@ class TestClient(object):
                 cert_key=None,
                 cert_cert='tests/client.crt')
 
-    def test_compact(self, etcd):
+    def test_compact(self, etcd: etcd3.Etcd3Client) -> None:
         etcd.compact(3)
         with pytest.raises(grpc.RpcError):
             etcd.compact(3)
 
-    def test_channel_with_no_cert(self):
+    def test_channel_with_no_cert(self) -> None:
         client = etcd3.client(
             ca_cert=None,
             cert_key=None,
@@ -1214,7 +1282,7 @@ class TestClient(object):
     @pytest.mark.skipif(etcd_version.startswith('v3.0'),
                         reason="requires etcd v3.1 or higher")
     @mock.patch('etcdrpc.AuthStub')
-    def test_user_pwd_auth(self, auth_mock):
+    def test_user_pwd_auth(self, auth_mock: etcd3.etcdrpc.AuthStub) -> None:
         auth_resp_mock = mock.MagicMock()
         auth_resp_mock.token = 'foo'
         auth_mock.Authenticate = auth_resp_mock
@@ -1229,27 +1297,27 @@ class TestClient(object):
         assert client.call_credentials is not None
         self._disable_auth_in_etcd()
 
-    def test_user_or_pwd_auth_raises_exception(self):
+    def test_user_or_pwd_auth_raises_exception(self) -> None:
         with pytest.raises(Exception):
             etcd3.client(user='usr')
 
         with pytest.raises(Exception):
             etcd3.client(password='pwd')
 
-    def _enable_auth_in_etcd(self):
+    def _enable_auth_in_etcd(self) -> None:
         subprocess.check_call(['etcdctl', '-w', 'json', 'user', 'add',
                                'root:pwd'])
         subprocess.check_call(['etcdctl', 'auth', 'enable'])
 
-    def _disable_auth_in_etcd(self):
+    def _disable_auth_in_etcd(self) -> None:
         subprocess.check_call(['etcdctl', '--user', 'root:pwd', 'auth',
                                'disable'])
         subprocess.check_call(['etcdctl', 'user', 'remove', 'root'])
 
 
-class TestCompares(object):
+class TestCompares:
 
-    def test_compare_version(self):
+    def test_compare_version(self) -> None:
         key = 'key'
         tx = etcd3.Transactions()
 
@@ -1267,7 +1335,7 @@ class TestCompares(object):
         assert version_compare.build_message().target == \
             etcdrpc.Compare.VERSION
 
-    def test_compare_value(self):
+    def test_compare_value(self) -> None:
         key = 'key'
         tx = etcd3.Transactions()
 
@@ -1284,7 +1352,7 @@ class TestCompares(object):
         assert value_compare.op == etcdrpc.Compare.GREATER
         assert value_compare.build_message().target == etcdrpc.Compare.VALUE
 
-    def test_compare_mod(self):
+    def test_compare_mod(self) -> None:
         key = 'key'
         tx = etcd3.Transactions()
 
@@ -1301,7 +1369,7 @@ class TestCompares(object):
         assert mod_compare.op == etcdrpc.Compare.GREATER
         assert mod_compare.build_message().target == etcdrpc.Compare.MOD
 
-    def test_compare_create(self):
+    def test_compare_create(self) -> None:
         key = 'key'
         tx = etcd3.Transactions()
 
@@ -1321,14 +1389,18 @@ class TestCompares(object):
 
 @pytest.mark.skipif(not os.environ.get('ETCDCTL_ENDPOINTS'),
                     reason="Expected etcd to have been run by pifpaf")
-class TestFailoverClient(object):
+class TestFailoverClient:
     @pytest.fixture
-    def etcd(self):
-        endpoint_urls = os.environ.get('ETCDCTL_ENDPOINTS').split(',')
+    def etcd(
+        self
+    ) -> typing.Generator[etcd3.MultiEndpointEtcd3Client, None, None]:
+        endpoint_urls = os.environ.get('ETCDCTL_ENDPOINTS', '').split(',')
         timeout = 5
         endpoints = []
-        for url in endpoint_urls:
-            url = urlparse(url)
+        for endpoint in endpoint_urls:
+            url = urlparse(endpoint)
+            assert url.hostname is not None
+            assert url.port is not None
             endpoints.append(etcd3.Endpoint(host=url.hostname,
                                             port=url.port,
                                             secure=False))
@@ -1338,7 +1410,7 @@ class TestFailoverClient(object):
             yield client
 
         @retry(wait=wait_fixed(2), stop=stop_after_attempt(3))
-        def delete_keys_definitely():
+        def delete_keys_definitely() -> None:
             # clean up after fixture goes out of scope
             etcdctl('del', '--prefix', '/')
             out = etcdctl('get', '--prefix', '/')
@@ -1346,7 +1418,7 @@ class TestFailoverClient(object):
 
         delete_keys_definitely()
 
-    def test_endpoint_offline(self, etcd):
+    def test_endpoint_offline(self, etcd: etcd3.Etcd3Client) -> None:
         original_endpoint = etcd.endpoint_in_use
         assert not original_endpoint.is_failed()
         exception = TestEtcd3.MockedException(grpc.StatusCode.UNAVAILABLE)
@@ -1363,14 +1435,21 @@ class TestFailoverClient(object):
         assert etcd.endpoint_in_use is not original_endpoint
         assert not etcd.endpoint_in_use.is_failed()
 
-    def test_failover_during_watch(self, etcd):
+    def test_failover_during_watch(self, etcd: etcd3.Etcd3Client) -> None:
         class Interceptor(grpc.StreamStreamClientInterceptor):
-            def intercept_stream_stream(self, continuation,
-                                        client_call_details, request_iterator):
+            def intercept_stream_stream(
+                self,
+                continuation: typing.Callable[
+                    [grpc.ClientCallDetails, typing.Any],
+                    typing.Any
+                ],
+                client_call_details: grpc.ClientCallDetails,
+                request_iterator: typing.Iterator,
+            ) -> 'grpc.CallIterator':
                 response_iterator = continuation(client_call_details,
                                                  request_iterator)
 
-                def new_iterator():
+                def new_iterator() -> 'grpc.CallIterator':  # type: ignore
                     yield next(response_iterator)
                     with etcd.watcher._new_watch_cond:
                         while True:
