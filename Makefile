@@ -1,6 +1,6 @@
 include MakefileHelp.mk
 
-ETCD_VERSION?=v3.5.6
+ETCD_VERSION?=v3.2.32
 ETCD_DOWNLOAD_URL?=https://github.com/etcd-io/etcd/releases/download
 ETCD_PROTO_SOURCE_URL?=https://raw.githubusercontent.com/etcd-io/jetcd/main/jetcd-grpc/src/main/proto/
 
@@ -47,6 +47,7 @@ uninstall: ## uninstalls local development dependencies
 
 clean: ## removes intermediate files and build artifacts
 	@if [ -d .etcd ]; then rm -rf .etcd; fi
+	@if [ -d .mypy_cache ]; then rm -rf .mypy_cache; fi
 	@if [ -d .pytest_cache ]; then rm -rf .pytest_cache; fi
 	@if [ -d .hypothesis ]; then rm -rf .hypothesis; fi
 	@if [ -f .coverage ]; then rm .coverage; fi
@@ -57,6 +58,7 @@ clean: ## removes intermediate files and build artifacts
 
 lint:  ## lints all code
 	@poetry run flake8
+	@poetry run mypy etcd3
 .PHONY: lint
 
 test: .etcd  ## runs the tests
@@ -69,26 +71,18 @@ build:  ## builds the project to tar & wheel formats
 	@poetry build
 .PHONY: build
 
-etcd3/proto:  ## clones the protobuf definitions
-	@mkdir -p etcd3/proto
-	@curl -L -s $(ETCD_PROTO_SOURCE_URL)/auth.proto -o etcd3/proto/auth.proto
-	@curl -L -s $(ETCD_PROTO_SOURCE_URL)/kv.proto -o etcd3/proto/kv.proto
-	@curl -L -s $(ETCD_PROTO_SOURCE_URL)/rpc.proto -o etcd3/proto/rpc.proto
-
-etcd3/etcdrpc: etcd3/proto  ## generates etcd protobuf definitions
+etcd3/etcdrpc:  ## generates etcd protobuf definitions
 	@mkdir -p etcd3/etcdrpc
-	@sed -i -e '/gogoproto/d' etcd3/proto/rpc.proto
-	@sed -i -e 's/etcd\/mvcc\/mvccpb\/kv.proto/kv.proto/g' etcd3/proto/rpc.proto
-	@sed -i -e 's/etcd\/auth\/authpb\/auth.proto/auth.proto/g' etcd3/proto/rpc.proto
-	@sed -i -e '/google\/api\/annotations.proto/d' etcd3/proto/rpc.proto
-	@sed -i -e '/option (google.api.http)/,+3d' etcd3/proto/rpc.proto
-	@poetry run python -m grpc.tools.protoc -Ietcd3/proto \
-		--python_out=etcd3/etcdrpc/ \
-		--grpc_python_out=etcd3/etcdrpc/ \
-		etcd3/proto/rpc.proto etcd3/proto/auth.proto etcd3/proto/kv.proto
-	@sed -i -e 's/import auth_pb2/from etcd3.etcdrpc import auth_pb2/g' etcd3/etcdrpc/rpc_pb2.py
-	@sed -i -e 's/import kv_pb2/from etcd3.etcdrpc import kv_pb2/g' etcd3/etcdrpc/rpc_pb2.py
-	@sed -i -e 's/import rpc_pb2/from etcd3.etcdrpc import rpc_pb2/g' etcd3/etcdrpc/rpc_pb2_grpc.py
-	@rm etcd3/etcdrpc/auth_pb2_grpc.py
-	@rm etcd3/etcdrpc/kv_pb2_grpc.py
+	@curl -L -s $(ETCD_PROTO_SOURCE_URL)/auth.proto -o etcd3/etcdrpc/auth.proto
+	@curl -L -s $(ETCD_PROTO_SOURCE_URL)/kv.proto -o etcd3/etcdrpc/kv.proto
+	@curl -L -s $(ETCD_PROTO_SOURCE_URL)/rpc.proto -o etcd3/etcdrpc/rpc.proto
+	@sed -i -e 's\import "auth.proto"\import "etcd3/etcdrpc/auth.proto"\g' etcd3/etcdrpc/rpc.proto
+	@sed -i -e 's\import "kv.proto"\import "etcd3/etcdrpc/kv.proto"\g' etcd3/etcdrpc/rpc.proto
+	@poetry run python -m grpc.tools.protoc \
+		-I . \
+		--python_out=. \
+		--grpc_python_out=. \
+		--mypy_out=quiet:. \
+		--mypy_grpc_out=quiet:. \
+		$(shell find ./etcd3 -type f -name '*.proto')
 .PHONY: etcd3/etcdrpc

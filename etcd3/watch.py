@@ -1,11 +1,12 @@
 import logging
 import queue
 import threading
+import typing
 
 import grpc
 
 import etcd3.etcdrpc as etcdrpc
-import etcd3.events as events
+import etcd3.events as etcd3_events
 import etcd3.exceptions as exceptions
 import etcd3.utils as utils
 
@@ -13,43 +14,53 @@ import etcd3.utils as utils
 _log = logging.getLogger(__name__)
 
 
-class Watch(object):
-
-    def __init__(self, watch_id, iterator=None, etcd_client=None):
-        self.watch_id = watch_id
-        self.etcd_client = etcd_client
-        self.iterator = iterator
-
-    def cancel(self):
-        self.etcd_client.cancel_watch(self.watch_id)
-
-    def iterator(self):
-        if self.iterator is not None:
-            return self.iterator
-
-        raise ValueError('Undefined iterator')
+WatchCallbackArg = typing.Union[
+    'WatchResponse',
+    grpc.RpcError,
+    exceptions.RevisionCompactedError
+]
+WatchCallback = typing.Callable[[WatchCallbackArg], None]
 
 
-class Watcher(object):
+class Watcher:
 
-    def __init__(self, watchstub, timeout=None, call_credentials=None,
-                 metadata=None):
+    def __init__(
+        self,
+        watchstub: etcdrpc.WatchStub,
+        timeout: typing.Optional[typing.Union[int, float]] = None,
+        call_credentials: typing.Optional[grpc.CallCredentials] = None,
+        metadata: typing.Optional[
+            typing.Tuple[typing.Tuple[str, str]]
+        ] = None
+    ):
         self.timeout = timeout
         self._watch_stub = watchstub
         self._credentials = call_credentials
         self._metadata = metadata
 
         self._lock = threading.Lock()
-        self._request_queue = queue.Queue(maxsize=10)
-        self._callbacks = {}
-        self._callback_thread = None
+        self._request_queue: 'queue.Queue[' \
+                             'typing.Optional[etcdrpc.WatchRequest]' \
+                             ']' = queue.Queue(maxsize=10)
+        self._callbacks: typing.Dict[int, WatchCallback] = {}
+        self._callback_thread: typing.Optional[threading.Thread] = None
         self._new_watch_cond = threading.Condition(lock=self._lock)
-        self._new_watch = None
+        self._new_watch: typing.Optional[_NewWatch] = None
         self._stopping = False
 
-    def _create_watch_request(self, key, range_end=None, start_revision=None,
-                              progress_notify=False, filters=None,
-                              prev_kv=False):
+    @staticmethod
+    def _create_watch_request(
+        key: typing.Union[bytes, str],
+        range_end: typing.Optional[typing.Union[bytes, str]] = None,
+        start_revision: typing.Optional[int] = None,
+        progress_notify: bool = False,
+        filters: typing.Optional[
+            typing.Iterable[
+                etcdrpc.WatchCreateRequest.FilterType.ValueType
+            ]
+        ] = None,
+        prev_kv: bool = False
+    ) -> etcdrpc.WatchRequest:
         create_watch = etcdrpc.WatchCreateRequest()
         create_watch.key = utils.to_bytes(key)
         if range_end is not None:
@@ -64,16 +75,32 @@ class Watcher(object):
             create_watch.prev_kv = prev_kv
         return etcdrpc.WatchRequest(create_request=create_watch)
 
-    def add_callback(self, key, callback, range_end=None, start_revision=None,
-                     progress_notify=False, filters=None, prev_kv=False):
-        rq = self._create_watch_request(key, range_end=range_end,
-                                        start_revision=start_revision,
-                                        progress_notify=progress_notify,
-                                        filters=filters, prev_kv=prev_kv)
+    def add_callback(
+        self,
+        key: typing.Union[bytes, str],
+        callback: WatchCallback,
+        range_end: typing.Optional[typing.Union[bytes, str]] = None,
+        start_revision: typing.Optional[int] = None,
+        progress_notify: bool = False,
+        filters: typing.Optional[
+            typing.Iterable[
+                etcdrpc.WatchCreateRequest.FilterType.ValueType
+            ]
+        ] = None,
+        prev_kv: bool = False
+    ) -> int:
+        rq = self._create_watch_request(
+            key,
+            range_end=range_end,
+            start_revision=start_revision,
+            progress_notify=progress_notify,
+            filters=filters,
+            prev_kv=prev_kv
+        )
 
         with self._lock:
             # Wait for exiting thread to close
-            if self._stopping:
+            if self._stopping and self._callback_thread:
                 self._callback_thread.join()
                 self._callback_thread = None
                 self._stopping = False
@@ -113,9 +140,9 @@ class Watcher(object):
                 self._new_watch = None
                 self._new_watch_cond.notify_all()
 
-            return new_watch.id
+            return typing.cast(int, new_watch.id)
 
-    def cancel(self, watch_id):
+    def cancel(self, watch_id: int) -> None:
         with self._lock:
             callback = self._callbacks.pop(watch_id, None)
             if not callback:
@@ -123,7 +150,7 @@ class Watcher(object):
 
             self._cancel_no_lock(watch_id)
 
-    def _run(self):
+    def _run(self) -> None:
         callback_err = None
         try:
             response_iter = self._watch_stub.Watch(
@@ -153,9 +180,12 @@ class Watcher(object):
                 self._request_queue = queue.Queue(maxsize=10)
 
             for callback in iter(callbacks.values()):
-                _safe_callback(callback, callback_err)
+                _safe_callback(
+                    callback,
+                    typing.cast(grpc.RpcError, callback_err)
+                )
 
-    def _handle_response(self, rs):
+    def _handle_response(self, rs: etcdrpc.WatchResponse) -> None:
         with self._lock:
             if rs.created:
                 # If the new watch request has already expired then cancel the
@@ -193,37 +223,48 @@ class Watcher(object):
         # Call the callback even when there are no events in the watch
         # response so as not to ignore progress notify responses.
         if rs.events or not (rs.created or rs.canceled):
-            new_events = [events.new_event(event) for event in rs.events]
+            new_events = [etcd3_events.new_event(event) for event in rs.events]
             response = WatchResponse(rs.header, new_events)
             _safe_callback(callback, response)
 
-    def _cancel_no_lock(self, watch_id):
+    def _cancel_no_lock(self, watch_id: int) -> None:
         cancel_watch = etcdrpc.WatchCancelRequest()
         cancel_watch.watch_id = watch_id
         rq = etcdrpc.WatchRequest(cancel_request=cancel_watch)
         self._request_queue.put(rq)
 
-    def close(self):
+    def close(self) -> None:
         with self._lock:
             if self._callback_thread and not self._stopping:
                 self._request_queue.put(None)
 
 
-class WatchResponse(object):
+class WatchResponse:
 
-    def __init__(self, header, events):
+    def __init__(
+        self,
+        header: etcdrpc.ResponseHeader,
+        events: typing.List[etcd3_events.Event]
+    ):
         self.header = header
         self.events = events
 
 
-class _NewWatch(object):
-    def __init__(self, callback):
+class _NewWatch:
+    def __init__(self, callback: WatchCallback):
         self.callback = callback
-        self.id = None
-        self.err = None
+        self.id: typing.Optional[int] = None
+        self.err: typing.Optional[
+            typing.Union[
+                grpc.RpcError,
+                exceptions.RevisionCompactedError
+            ]
+        ] = None
 
 
-def _new_request_iter(_request_queue):
+def _new_request_iter(
+    _request_queue: 'queue.Queue[typing.Optional[etcdrpc.WatchRequest]]'
+) -> typing.Iterator[etcdrpc.WatchRequest]:
     while True:
         rq = _request_queue.get()
         if rq is None:
@@ -232,7 +273,10 @@ def _new_request_iter(_request_queue):
         yield rq
 
 
-def _safe_callback(callback, response_or_err):
+def _safe_callback(
+    callback: WatchCallback,
+    response_or_err: WatchCallbackArg
+) -> None:
     try:
         callback(response_or_err)
 

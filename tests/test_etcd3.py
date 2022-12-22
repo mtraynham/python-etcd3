@@ -71,7 +71,7 @@ def _out_quorum():
 
 class TestEtcd3(object):
 
-    class MockedException(grpc.RpcError):
+    class MockedException(grpc.RpcError, grpc.Call):
         def __init__(self, code):
             self._code = code
 

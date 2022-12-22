@@ -16,8 +16,8 @@
 
 syntax = "proto3";
 
-import "kv.proto";
-import "auth.proto";
+import "etcd3/etcdrpc/kv.proto";
+import "etcd3/etcdrpc/auth.proto";
 
 package etcdserverpb;
 

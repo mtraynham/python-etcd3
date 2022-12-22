@@ -1,11 +1,18 @@
 import threading
 import time
+import typing
 import uuid
 
-from etcd3 import events, exceptions
+import etcd3.etcdrpc as etcdrpc
+import etcd3.events as events
+import etcd3.exceptions as exceptions
+import etcd3.leases as leases
+
+if typing.TYPE_CHECKING:
+    import etcd3.client as client
 
 
-class Lock(object):
+class Lock:
     """
     A distributed lock.
 
@@ -33,20 +40,23 @@ class Lock(object):
 
     lock_prefix = '/locks/'
 
-    def __init__(self, name, ttl=60,
-                 etcd_client=None):
+    def __init__(
+        self,
+        name: str,
+        etcd_client: 'client.MultiEndpointEtcd3Client',
+        ttl: int = 60
+    ):
         self.name = name
         self.ttl = ttl
-        if etcd_client is not None:
-            self.etcd_client = etcd_client
+        self.etcd_client = etcd_client
 
         self.key = self.lock_prefix + self.name
-        self.lease = None
+        self.lease: typing.Optional[leases.Lease] = None
         # store uuid as bytes, since it avoids having to decode each time we
         # need to compare
         self.uuid = uuid.uuid1().bytes
 
-    def acquire(self, timeout=10):
+    def acquire(self, timeout: int = 10) -> bool:
         """Acquire the lock.
 
         :params timeout: Maximum time to wait before returning. `None` means
@@ -57,6 +67,8 @@ class Lock(object):
         """
         if timeout is not None:
             deadline = time.time() + timeout
+        else:
+            deadline = None
 
         while True:
             if self._try_acquire():
@@ -71,7 +83,7 @@ class Lock(object):
 
             self._wait_delete_event(remaining_timeout)
 
-    def _try_acquire(self):
+    def _try_acquire(self) -> bool:
         self.lease = self.etcd_client.lease(self.ttl)
 
         success, metadata = self.etcd_client.transaction(
@@ -87,13 +99,19 @@ class Lock(object):
             ]
         )
         if success is True:
-            self.revision = metadata[0].response_put.header.revision
+            self.revision = typing.cast(
+                etcdrpc.ResponseOp,
+                metadata[0]
+            ).response_put.header.revision
             return True
-        self.revision = metadata[0][0][1].mod_revision
+        self.revision = typing.cast(
+            typing.List[typing.Tuple[bytes, 'client.KVMetadata']],
+            metadata[0]
+        )[0][1].mod_revision
         self.lease = None
         return False
 
-    def _wait_delete_event(self, timeout):
+    def _wait_delete_event(self, timeout: float) -> None:
         try:
             event_iter, cancel = self.etcd_client.watch(
                 self.key, start_revision=self.revision + 1)
@@ -114,7 +132,7 @@ class Lock(object):
                 cancel()
                 break
 
-    def release(self):
+    def release(self) -> bool:
         """Release the lock."""
         success, _ = self.etcd_client.transaction(
             compare=[
@@ -125,7 +143,7 @@ class Lock(object):
         )
         return success
 
-    def refresh(self):
+    def refresh(self) -> typing.List[etcdrpc.LeaseKeepAliveResponse]:
         """Refresh the time to live on this lock."""
         if self.lease is not None:
             return self.lease.refresh()
@@ -133,7 +151,7 @@ class Lock(object):
             raise ValueError('No lease associated with this lock - have you '
                              'acquired the lock yet?')
 
-    def is_acquired(self):
+    def is_acquired(self) -> bool:
         """Check if this lock is currently acquired."""
         uuid, _ = self.etcd_client.get(self.key)
 
@@ -142,9 +160,14 @@ class Lock(object):
 
         return uuid == self.uuid
 
-    def __enter__(self):
+    def __enter__(self) -> 'Lock':
         self.acquire()
         return self
 
-    def __exit__(self, exception_type, exception_value, traceback):
+    def __exit__(
+        self,
+        exception_type: typing.Any,
+        exception_value: typing.Any,
+        traceback: typing.Any
+    ) -> None:
         self.release()
