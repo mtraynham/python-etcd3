@@ -15,11 +15,9 @@ class Event:
         return getattr(self._event.kv, name)
 
     def __str__(self) -> str:
-        return '{type} key={key} value={value}'.format(
-            type=self.__class__,
-            key=self.key.decode('utf-8'),
-            value=self.value.decode('utf-8')
-        )
+        return '{type} key={key} value={value}'.format(type=self.__class__,
+                                                       key=self.key,
+                                                       value=self.value)
 
 
 class PutEvent(Event):

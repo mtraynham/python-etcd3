@@ -89,18 +89,14 @@ class Watcher:
         ] = None,
         prev_kv: bool = False
     ) -> int:
-        rq = self._create_watch_request(
-            key,
-            range_end=range_end,
-            start_revision=start_revision,
-            progress_notify=progress_notify,
-            filters=filters,
-            prev_kv=prev_kv
-        )
+        rq = self._create_watch_request(key, range_end=range_end,
+                                        start_revision=start_revision,
+                                        progress_notify=progress_notify,
+                                        filters=filters, prev_kv=prev_kv)
 
         with self._lock:
             # Wait for exiting thread to close
-            if self._stopping and self._callback_thread:
+            if self._stopping:
                 self._callback_thread.join()
                 self._callback_thread = None
                 self._stopping = False

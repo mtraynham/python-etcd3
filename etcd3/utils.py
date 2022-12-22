@@ -24,25 +24,22 @@ def to_bytes(maybe_bytestring: typing.Union[bytes, str, int]) -> bytes:
     """
     if isinstance(maybe_bytestring, bytes):
         return maybe_bytestring
-    elif isinstance(maybe_bytestring, int):
-        return str(maybe_bytestring).encode('utf-8')
     else:
         return maybe_bytestring.encode('utf-8')
 
 
 def lease_to_id(
-    lease: typing.Optional[typing.Union[leases.Lease, int, str]]
+    lease: typing.Union[leases.Lease, int, str]
 ) -> int:
     """Figure out if the argument is a Lease object, or the lease ID."""
     lease_id = 0
-    if lease:
-        if hasattr(lease, 'id'):
-            lease_id = lease.id
-        else:
-            try:
-                lease_id = int(lease)
-            except TypeError:
-                pass
+    if hasattr(lease, 'id'):
+        lease_id = lease.id
+    else:
+        try:
+            lease_id = int(lease)
+        except TypeError:
+            pass
     return lease_id
 
 

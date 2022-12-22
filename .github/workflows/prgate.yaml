@@ -101,8 +101,8 @@ jobs:
       - name: Install dependencies
         run: make install
 
-      - name: Lint code
-        run: make lint
+#      - name: Lint code
+#        run: make lint
 
       - name: Run tests
         run: make test

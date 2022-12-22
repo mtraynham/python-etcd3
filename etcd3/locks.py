@@ -67,8 +67,6 @@ class Lock:
         """
         if timeout is not None:
             deadline = time.time() + timeout
-        else:
-            deadline = None
 
         while True:
             if self._try_acquire():

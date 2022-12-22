@@ -50,13 +50,10 @@ class BaseCompare:
         if self.range_end is None:
             keys = self.key
         else:
-            keys = "[{}, {})".format(str(self.key), str(self.range_end))
-        return "{}: {} {} '{}'".format(
-            self.__class__,
-            str(keys),
-            _OPERATORS.get(self.op) if self.op else '?',
-            str(self.value)
-        )
+            keys = "[{}, {})".format(self.key, self.range_end)
+        return "{}: {} {} '{}'".format(self.__class__, keys,
+                                       _OPERATORS.get(self.op),
+                                       self.value)
 
     def build_message(self) -> etcdrpc.Compare:
         compare = etcdrpc.Compare()
@@ -79,29 +76,25 @@ class BaseCompare:
 class Value(BaseCompare):
     def build_compare(self, compare: etcdrpc.Compare) -> None:
         compare.target = etcdrpc.Compare.VALUE
-        if self.value is not None:
-            compare.value = utils.to_bytes(self.value)
+        compare.value = utils.to_bytes(self.value)
 
 
 class Version(BaseCompare):
     def build_compare(self, compare: etcdrpc.Compare) -> None:
         compare.target = etcdrpc.Compare.VERSION
-        if self.value is not None:
-            compare.version = int(self.value)
+        compare.version = int(self.value)
 
 
 class Create(BaseCompare):
     def build_compare(self, compare: etcdrpc.Compare) -> None:
         compare.target = etcdrpc.Compare.CREATE
-        if self.value is not None:
-            compare.create_revision = int(self.value)
+        compare.create_revision = int(self.value)
 
 
 class Mod(BaseCompare):
     def build_compare(self, compare: etcdrpc.Compare) -> None:
         compare.target = etcdrpc.Compare.MOD
-        if self.value is not None:
-            compare.mod_revision = int(self.value)
+        compare.mod_revision = int(self.value)
 
 
 class Put:

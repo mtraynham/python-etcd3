@@ -193,10 +193,7 @@ def _handle_errors(
         try:
             return payload(self, *args, **kwargs)
         except grpc.RpcError as exc:
-            if isinstance(exc, grpc.Call):
-                self._manage_grpc_errors(exc)
-            else:
-                raise exc
+            self._manage_grpc_errors(exc)
     return handler
 
 
@@ -213,10 +210,7 @@ def _handle_generator_errors(
             for item in payload(self, *args, **kwargs):
                 yield item
         except grpc.RpcError as exc:
-            if isinstance(exc, grpc.Call):
-                self._manage_grpc_errors(exc)
-            else:
-                raise exc
+            self._manage_grpc_errors(exc)
     return handler
 
 
@@ -277,21 +271,21 @@ class MultiEndpointEtcd3Client:
         self.timeout = timeout
         self.call_credentials = None
 
-        if user and password:
+        if user is not None and password is not None:
             auth_request = etcdrpc.AuthenticateRequest(
                 name=user,
                 password=password
             )
 
-            resp = self.authstub.Authenticate(
-                auth_request,
-                timeout=self.timeout
-            )
+            resp = self.authstub.Authenticate(auth_request, self.timeout)
             self.metadata = (('token', resp.token),)
             self.call_credentials = grpc.metadata_call_credentials(
                 EtcdTokenCallCredentials(resp.token))
 
-        elif (not user and password) or (user and not password):
+        elif (
+            (user is not None and password is None)
+            or (user is None and password is not None)
+        ):
             raise Exception(
                 'if using authentication credentials both user and password '
                 'must be specified.'
@@ -659,7 +653,7 @@ class MultiEndpointEtcd3Client:
         range_response = self.get_range_response(range_start, range_end,
                                                  **kwargs)
         for kv in range_response.kvs:
-            yield kv.value, KVMetadata(kv, range_response.header)
+            yield (kv.value, KVMetadata(kv, range_response.header))
 
     @_handle_errors
     def get_all_response(
@@ -699,7 +693,7 @@ class MultiEndpointEtcd3Client:
         """
         range_response = self.get_all_response(**kwargs)
         for kv in range_response.kvs:
-            yield kv.value, KVMetadata(kv, range_response.header)
+            yield (kv.value, KVMetadata(kv, range_response.header))
 
     @staticmethod
     def _build_put_request(
@@ -995,17 +989,13 @@ class MultiEndpointEtcd3Client:
                     response = response_queue.get()
                     if response is None:
                         canceled.set()
-                        continue
                     if isinstance(response, Exception):
                         canceled.set()
                         raise response
                     if not canceled.is_set():
                         yield response
             except grpc.RpcError as exc:
-                if isinstance(exc, grpc.Call):
-                    self._manage_grpc_errors(exc)
-                else:
-                    raise exc
+                self._manage_grpc_errors(exc)
 
         return iterator(), cancel
 
@@ -1344,10 +1334,7 @@ class MultiEndpointEtcd3Client:
         :returns: new lease
         :rtype: :class:`.Lease`
         """
-        lease_grant_request = etcdrpc.LeaseGrantRequest(
-            TTL=ttl,
-            ID=lease_id or 0
-        )
+        lease_grant_request = etcdrpc.LeaseGrantRequest(TTL=ttl, ID=lease_id)
         lease_grant_response = self.leasestub.LeaseGrant(
             lease_grant_request,
             self.timeout,
@@ -1542,10 +1529,7 @@ class MultiEndpointEtcd3Client:
         :rtype: int
         """
         hash_request = etcdrpc.HashRequest()
-        hash_response: etcdrpc.HashResponse = self.maintenancestub.Hash(
-            hash_request
-        )
-        return hash_response.hash
+        return self.maintenancestub.Hash(hash_request).hash
 
     @staticmethod
     def _build_alarm_request(
