@@ -129,7 +129,8 @@ class ExtendedClient:
     ):
         self._client = client
         self._watcher = watch.Watch(
-            client=self._client,
+            watch_stub=self._client._watch_stub,
+            call_credentials=self._client._call_credentials,
             timeout=watch_timeout
         )
 

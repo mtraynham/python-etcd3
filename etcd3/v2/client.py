@@ -150,49 +150,6 @@ class Client:
         for response in call_iterator:
             yield response
 
-    def watch(
-        self,
-        request_iterator: typing.Iterator[typing.Union[
-            rpc_pb2.WatchCreateRequest,
-            rpc_pb2.WatchCancelRequest,
-            rpc_pb2.WatchProgressRequest
-        ]]
-    ) -> typing.Iterator[rpc_pb2.WatchResponse]:
-        def map_request(
-            request: typing.Union[
-                rpc_pb2.WatchCreateRequest,
-                rpc_pb2.WatchCancelRequest,
-                rpc_pb2.WatchProgressRequest
-            ]
-        ) -> rpc_pb2.WatchRequest:
-            create_request = None
-            cancel_request = None
-            progress_request = None
-            if isinstance(request, rpc_pb2.WatchCreateRequest):
-                create_request = request
-            elif isinstance(request, rpc_pb2.WatchCancelRequest):
-                cancel_request = request
-            elif isinstance(request, rpc_pb2.WatchProgressRequest):
-                progress_request = request
-            else:
-                raise
-            return rpc_pb2.WatchRequest(
-                create_request=create_request,
-                cancel_request=cancel_request,
-                progress_request=progress_request
-            )
-
-        call_iterator = self._watch_stub.Watch(
-            request_iterator=(
-                map_request(request)
-                for request in request_iterator
-            ),
-            timeout=self._timeout,
-            credentials=self._call_credentials
-        )
-        for response in call_iterator:
-            yield response
-
     def member_list(self) -> rpc_pb2.MemberListResponse:
         request = rpc_pb2.MemberListRequest()
         return self._cluster_stub.MemberList(

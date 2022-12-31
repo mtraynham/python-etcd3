@@ -33,8 +33,10 @@ import queue
 import threading
 import typing
 
+import grpc
+
 from etcd3.etcdrpc import rpc_pb2
-from etcd3.v2 import client as etcd3_client
+from etcd3.etcdrpc import rpc_pb2_grpc
 
 
 class WatchError(Exception):
@@ -92,7 +94,7 @@ def noop(
 class WatchThread(threading.Thread):
     def __init__(
         self,
-        client: etcd3_client.Client,
+        watch_stub: rpc_pb2_grpc.WatchStub,
         request_queue: queue.Queue[
             typing.Optional[
                 typing.Union[
@@ -102,13 +104,15 @@ class WatchThread(threading.Thread):
                 ]
             ]
         ],
+        call_credentials: typing.Optional[grpc.CallCredentials] = None,
         timeout: typing.Optional[float] = None,
         *args: typing.Any,
         **kwargs: typing.Any
     ):
         super().__init__(*args, **kwargs)
-        self._client = client
+        self._watch_stub = watch_stub
         self._request_queue = request_queue
+        self._call_credentials = call_credentials
         self._timeout = timeout
         self._lock = threading.Lock()
         self._lock_condition = threading.Condition(lock=self._lock)
@@ -288,16 +292,60 @@ class WatchThread(threading.Thread):
 
     def run(self) -> None:
         request_iterator = self.request_iterator()
-        call_iterator = self._client.watch(
+        call_iterator = self.watch(
             request_iterator=request_iterator
         )
         self.response_handler(call_iterator)
+
+    def watch(
+        self,
+        request_iterator: typing.Iterator[typing.Union[
+            rpc_pb2.WatchCreateRequest,
+            rpc_pb2.WatchCancelRequest,
+            rpc_pb2.WatchProgressRequest
+        ]]
+    ) -> typing.Iterator[rpc_pb2.WatchResponse]:
+        def map_request(
+            request: typing.Union[
+                rpc_pb2.WatchCreateRequest,
+                rpc_pb2.WatchCancelRequest,
+                rpc_pb2.WatchProgressRequest
+            ]
+        ) -> rpc_pb2.WatchRequest:
+            create_request = None
+            cancel_request = None
+            progress_request = None
+            if isinstance(request, rpc_pb2.WatchCreateRequest):
+                create_request = request
+            elif isinstance(request, rpc_pb2.WatchCancelRequest):
+                cancel_request = request
+            elif isinstance(request, rpc_pb2.WatchProgressRequest):
+                progress_request = request
+            else:
+                raise
+            return rpc_pb2.WatchRequest(
+                create_request=create_request,
+                cancel_request=cancel_request,
+                progress_request=progress_request
+            )
+
+        call_iterator = self._watch_stub.Watch(
+            request_iterator=(
+                map_request(request)
+                for request in request_iterator
+            ),
+            timeout=self._timeout,
+            credentials=self._call_credentials
+        )
+        for response in call_iterator:
+            yield response
 
 
 class Watch:
     def __init__(
         self,
-        client: etcd3_client.Client,
+        watch_stub: rpc_pb2_grpc.WatchStub,
+        call_credentials: typing.Optional[grpc.CallCredentials] = None,
         timeout: typing.Optional[float] = None
     ):
         self._request_queue: queue.Queue[
@@ -311,7 +359,8 @@ class Watch:
         ] = queue.Queue()
         self._id_generator = itertools.count()
         self._thread = WatchThread(
-            client=client,
+            watch_stub=watch_stub,
+            call_credentials=call_credentials,
             request_queue=self._request_queue,
             timeout=timeout,
             daemon=True

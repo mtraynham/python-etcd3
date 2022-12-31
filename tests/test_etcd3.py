@@ -33,6 +33,7 @@ import etcd3.exceptions
 import etcd3.utils as utils
 import etcd3.watch as watch
 from etcd3.client import EtcdTokenCallCredentials
+from etcd3.v2 import watch as v2_watch
 
 etcd_version = os.environ.get('TEST_ETCD_VERSION', 'v3.2.8')
 
@@ -222,19 +223,6 @@ class TestEtcd3:
         v, _ = etcd.get('/foo/2')
         assert v is None
 
-    def test_new_watch_error(self, etcd: etcd3.Etcd3Client) -> None:
-        # Trigger a failure while waiting on the new watch condition
-        with mock.patch.object(etcd.watcher._new_watch_cond, 'wait',
-                               side_effect=ValueError):
-            with pytest.raises(ValueError):
-                etcd.watch('/foo')
-
-        # Ensure a new watch can be created
-        events, cancel = etcd.watch('/foo')
-        etcdctl('put', '/foo', '42')
-        next(events)
-        cancel()
-
     def test_watch_key(self, etcd: etcd3.Etcd3Client) -> None:
         def update_etcd(v: str) -> None:
             etcdctl('put', '/doot/watch', v)
@@ -311,8 +299,8 @@ class TestEtcd3:
                 next(events_iterator)
             except Exception as err:
                 error_raised = True
-                assert isinstance(err, etcd3.exceptions.RevisionCompactedError)
-                compacted_revision = err.compacted_revision
+                assert isinstance(err, v2_watch.RevisionCompactedError)
+                compacted_revision = err.compact_revision
 
             assert error_raised is True
             assert compacted_revision == 2
@@ -1434,48 +1422,3 @@ class TestFailoverClient:
         etcd.get("foo")
         assert etcd.endpoint_in_use is not original_endpoint
         assert not etcd.endpoint_in_use.is_failed()
-
-    def test_failover_during_watch(self, etcd: etcd3.Etcd3Client) -> None:
-        class Interceptor(grpc.StreamStreamClientInterceptor):
-            def intercept_stream_stream(
-                self,
-                continuation: typing.Callable[
-                    [grpc.ClientCallDetails, typing.Any],
-                    typing.Any
-                ],
-                client_call_details: grpc.ClientCallDetails,
-                request_iterator: typing.Iterator,
-            ) -> 'grpc.CallIterator':
-                response_iterator = continuation(client_call_details,
-                                                 request_iterator)
-
-                def new_iterator() -> 'grpc.CallIterator':  # type: ignore
-                    yield next(response_iterator)
-                    with etcd.watcher._new_watch_cond:
-                        while True:
-                            etcd.watcher._new_watch_cond.wait()
-                            if etcd.watcher._new_watch is None:
-                                break
-                    with response_iterator._state.condition:
-                        response_iterator._state.code = \
-                            grpc.StatusCode.UNAVAILABLE
-                    yield next(response_iterator)
-                return new_iterator()
-
-        original_endpoint = etcd.endpoint_in_use
-        assert not original_endpoint.is_failed()
-        failing_channel = grpc.intercept_channel(original_endpoint.channel,
-                                                 Interceptor())
-        with mock.patch.object(original_endpoint, "channel", failing_channel):
-            iterator, cancel = etcd.watch("foo")
-            with pytest.raises(etcd3.exceptions.ConnectionFailedError):
-                next(iterator)
-        assert etcd.endpoint_in_use is original_endpoint
-        assert etcd.endpoint_in_use.is_failed()
-        cancel()
-        assert etcd.endpoint_in_use is not original_endpoint
-        assert not etcd.endpoint_in_use.is_failed()
-        iterator, cancel = etcd.watch("foo")
-        etcd.put("foo", b"foo")
-        assert next(iterator)
-        cancel()
