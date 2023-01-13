@@ -1,59 +1,10 @@
 import typing
 from uuid import uuid4
 
-from etcd3.etcdrpc import rpc_pb2
 from etcd3.v2 import client as etcd3_client
-from etcd3.v2 import requests
-
-
-def acquire_request(
-    key: bytes,
-    uuid: bytes,
-    lease: rpc_pb2.LeaseGrantResponse
-) -> rpc_pb2.TxnRequest:
-    return requests.txn_request(
-        compare=[
-            requests.txn_compare(
-                result=rpc_pb2.Compare.CompareResult.EQUAL,
-                target=rpc_pb2.Compare.CompareTarget.CREATE,
-                key=key,
-                create_revision=0
-            )
-        ],
-        success=[
-            requests.put_request(
-                key=key,
-                value=uuid,
-                lease=lease.ID
-            )
-        ],
-        failure=[
-            requests.range_request(
-                key=key
-            )
-        ]
-    )
-
-
-def release_request(
-    key: bytes,
-    uuid: bytes
-) -> rpc_pb2.TxnRequest:
-    return requests.txn_request(
-        compare=[
-            requests.txn_compare(
-                result=rpc_pb2.Compare.CompareResult.EQUAL,
-                target=rpc_pb2.Compare.CompareTarget.VALUE,
-                key=key,
-                value=uuid
-            )
-        ],
-        success=[
-            requests.delete_range_request(
-                key=key
-            )
-        ]
-    )
+from etcd3.v2 import watch as etcd3_watch
+from etcdrpc import rpc_pb2
+from v2 import requests
 
 
 class Lock:
@@ -61,32 +12,72 @@ class Lock:
         self,
         name: str,
         client: etcd3_client.Client,
+        watch: etcd3_watch.Watch,
         ttl: int = 60
     ):
         self._client = client
+        self._watch = watch
         self._key = f'/locks/{name}'.encode('utf-8')
         self._uuid = uuid4().bytes
         self._ttl = ttl
         self._lease: typing.Optional[rpc_pb2.LeaseGrantResponse] = None
         self._revision: typing.Optional[int] = None
 
-    def acquire(self) -> bool:
-        self._lease = self._client.lease_grant(ttl=self._ttl)
+    def _acquire(self) -> typing.Tuple[
+        rpc_pb2.LeaseGrantResponse,
+        rpc_pb2.TxnResponse
+    ]:
+        lease = self._client.lease_grant(ttl=self._ttl)
         response = self._client.txn(
-            request=acquire_request(
-                key=self._key,
-                uuid=self._uuid,
-                lease=self._lease
+            request=requests.txn_request(
+                compare=[
+                    requests.txn_compare(
+                        result=rpc_pb2.Compare.CompareResult.EQUAL,
+                        target=rpc_pb2.Compare.CompareTarget.CREATE,
+                        key=self._key,
+                        create_revision=0
+                    )
+                ],
+                success=[
+                    requests.put_request(
+                        key=self._key,
+                        value=self._uuid,
+                        lease=lease.ID
+                    )
+                ],
+                failure=[
+                    requests.range_request(
+                        key=self._key
+                    )
+                ]
             )
         )
-        txn_response = response.responses.pop()
+        return (
+            lease,
+            response
+        )
+
+    def acquire(
+        self,
+        timeout: typing.Optional[float]
+    ) -> bool:
+        lease, response = self._acquire()
         if response.succeeded:
-            response_put = txn_response.response_put
-            self._revision = response_put.header.revision
+            self._lease = lease
         else:
-            response_range = txn_response.response_range
-            self._revision = response_range.kvs.pop().mod_revision
-            self._lease = None
+            if timeout:
+                self._watch.create_once(
+                    request=etcd3_watch.watch_create_request(
+                        key=self._key,
+                        start_revision=response.responses.response_range.kvs.pop().mod_revision,
+                        filters=[rpc_pb2.WatchCreateRequest.FilterType.NOPUT]
+                    ),
+                    timeout=timeout
+                )
+                lease, response = self._acquire()
+                if response.succeeded:
+                    self._lease = lease
+
         return response.succeeded
 
     def is_acquired(self) -> bool:
@@ -96,16 +87,30 @@ class Lock:
         kv = response.kvs.pop()
         return kv is not None and kv.value == self._uuid
 
-    def refresh(self) -> typing.List[rpc_pb2.LeaseKeepAliveResponse]:
+    def refresh(self) -> typing.Optional[rpc_pb2.LeaseKeepAliveResponse]:
         if self._lease is not None:
-            return list(self._client.lease_keep_alive(iter([self._lease.ID])))
-        return []
+            return next(
+                self._client.lease_keep_alive(iter([self._lease.ID]))
+            )
+
+        return None
 
     def release(self) -> bool:
         response = self._client.txn(
-            request=release_request(
-                key=self._key,
-                uuid=self._uuid
+            request=requests.txn_request(
+                compare=[
+                    requests.txn_compare(
+                        result=rpc_pb2.Compare.CompareResult.EQUAL,
+                        target=rpc_pb2.Compare.CompareTarget.VALUE,
+                        key=self._key,
+                        value=self._uuid
+                    )
+                ],
+                success=[
+                    requests.delete_range_request(
+                        key=self._key
+                    )
+                ]
             )
         )
         if response.succeeded:
